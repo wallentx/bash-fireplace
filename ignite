@@ -18,7 +18,7 @@ SHUTDOWN_FLAG="/tmp/ascii_server.shutdown"  # Flag to signal shutdown
 # a full/absolute path, resolving symlinks if necessary.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
-trap cnorm SIGINT SIGQUIT
+trap tput cnorm SIGINT SIGQUIT
 
 ###############################################################################
 # 1. Animation function
