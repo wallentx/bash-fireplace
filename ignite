@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+PORT=1225  # The port to listen on
+FOLDER="fireplace"  # Folder containing ASCII art frames
+DELAY=0.1  # Delay between frames
+
+# Function to serve the animation
+serve_animation() {
+  while :; do
+    for frame in "$FOLDER"/*.txt; do
+      cat "$frame"
+      sleep "$DELAY"
+      printf "\033c"  # Clear the screen for the next frame
+    done
+  done
+}
+
+# Start the server
+echo "Starting ASCII art server on port $PORT..."
+while :; do
+  # Listen for incoming connections and serve the animation
+  nc -l -p "$PORT" -c serve_animation
+done
