@@ -1,23 +1,162 @@
 #!/usr/bin/env bash
 
-PORT=1225  # The port to listen on
-FOLDER="fireplace"  # Folder containing ASCII art frames
-DELAY=0.1  # Delay between frames
+###############################################################################
+# Configuration variables
+###############################################################################
+PORT=1225                              # The port to listen on
+FOLDER="fireplace"                     # Folder containing ASCII art frames
+DELAY=0.1                              # Delay between frames
+LOG_FILE="/tmp/ascii_server.log"       # Log file for server activity
+PID_FILE="/tmp/ascii_server.pid"       # PID file for the daemon
+STATUS_FILE="/tmp/ascii_server.status" # Status file for tracking users
+SHUTDOWN_FLAG="/tmp/ascii_server.shutdown"  # Flag to signal shutdown
 
-# Function to serve the animation
+###############################################################################
+# Script path resolution
+###############################################################################
+# BASH_SOURCE[0] is the name of this script file. readlink -f converts it to
+# a full/absolute path, resolving symlinks if necessary.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+
+###############################################################################
+# 1. Animation function
+###############################################################################
 serve_animation() {
-  while :; do
+  local remote_addr="$1"
+  # If the client is known, log it
+  [[ -n "$remote_addr" ]] && echo "$(date): Connection from $remote_addr" >> "$STATUS_FILE"
+
+  # Clear the screen and hide the cursor
+  clear
+  tput civis
+
+  # If we get SIGPIPE, set a flag
+  stop_animation=false
+  sigpipe_handler() {
+    stop_animation=true
+  }
+  trap sigpipe_handler PIPE
+
+  while ! $stop_animation; do
     for frame in "$FOLDER"/*.txt; do
-      cat "$frame"
+      # If SIGPIPE was triggered, break out
+      $stop_animation && break 2
+
+      if ! printf "\033[H"; then
+        break 2
+      fi
+
+      if ! cat "$frame"; then
+        break 2
+      fi
+
       sleep "$DELAY"
-      printf "\033c"  # Clear the screen for the next frame
     done
   done
+
+  tput cnorm
+  # Reset the trap
+  trap - PIPE
 }
 
-# Start the server
-echo "Starting ASCII art server on port $PORT..."
-while :; do
-  # Listen for incoming connections and serve the animation
-  nc -l -p "$PORT" -c serve_animation
-done
+###############################################################################
+# 2. Server control functions: start, status, stop
+###############################################################################
+start_server() {
+  if [[ -f "$PID_FILE" ]]; then
+    echo "Server is already running (PID: $(cat "$PID_FILE"))."
+    exit 1
+  fi
+
+  echo "Starting server on port $PORT..."
+  echo "0" > "$STATUS_FILE"    # Reset connected users count
+  rm -f "$SHUTDOWN_FLAG"       # Clear any existing shutdown flag
+
+  # Run the server in the background
+  (
+    total_connections=0
+    while true; do
+      # If the shutdown flag exists, break
+      [[ -f "$SHUTDOWN_FLAG" ]] && break
+
+      # Listen for incoming connections
+      nc -l -p "$PORT" -k -c "bash -c 'source \"$SCRIPT_PATH\"; \"$SCRIPT_PATH\" \"\$NCAT_REMOTE_ADDR\"'" &
+      child_pid=$!
+      wait $child_pid || true  # Prevent client disconnection from killing the server
+      total_connections=$((total_connections + 1))
+      echo "Total connections: $total_connections" > "$STATUS_FILE"
+    done
+  ) >> "$LOG_FILE" 2>&1 &
+
+  echo $! > "$PID_FILE"
+  echo "Server started (PID: $!)."
+}
+
+server_status() {
+  if [[ ! -f "$PID_FILE" ]]; then
+    echo "Server is not running."
+    exit 0
+  fi
+
+  local pid
+  pid="$(cat "$PID_FILE")"
+
+  if ps -p "$pid" > /dev/null 2>&1; then
+    echo "Server is running (PID: $pid)."
+    if [[ -f "$STATUS_FILE" ]]; then
+      echo "Connections so far: $(cat "$STATUS_FILE")"
+    fi
+  else
+    echo "Server is not running, but PID file exists. Cleaning up."
+    rm -f "$PID_FILE" "$STATUS_FILE"
+  fi
+}
+
+stop_server() {
+  if [[ ! -f "$PID_FILE" ]]; then
+    echo "Server is not running."
+    exit 0
+  fi
+
+  local pid
+  pid="$(cat "$PID_FILE")"
+  echo "Stopping server (PID: $pid)..."
+  touch "$SHUTDOWN_FLAG"
+  kill "$pid"
+  rm -f "$PID_FILE" "$SHUTDOWN_FLAG"
+  echo "Server stopped."
+}
+
+###############################################################################
+# 3. Main entrypoint
+###############################################################################
+# If invoked with no arguments, serve animation locally.
+if [[ $# -eq 0 ]]; then
+  serve_animation
+  exit 0
+fi
+
+# If invoked with an IP address (e.g., via nc), serve animation for that connection.
+if [[ $# -eq 1 ]] && [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  serve_animation "$1"
+  exit 0
+fi
+
+# Otherwise, handle server commands: start|stop|status.
+case "$1" in
+  start)
+    start_server
+    ;;
+  stop)
+    stop_server
+    ;;
+  status)
+    server_status
+    ;;
+  *)
+    echo "Usage: $0 [start|stop|status]"
+    echo "Running '$0' with no arguments plays the ASCII animation in this terminal."
+    echo "Running '$0 <IP>' serves the animation to a connected client (used internally)."
+    exit 1
+    ;;
+esac
