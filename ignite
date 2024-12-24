@@ -18,13 +18,19 @@ SHUTDOWN_FLAG="/tmp/ascii_server.shutdown"  # Flag to signal shutdown
 # a full/absolute path, resolving symlinks if necessary.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
+trap cnorm SIGINT SIGQUIT
+
 ###############################################################################
 # 1. Animation function
 ###############################################################################
 serve_animation() {
   local remote_addr="$1"
-  # If the client is known, log it
-  [[ -n "$remote_addr" ]] && echo "$(date): Connection from $remote_addr" >> "$STATUS_FILE"
+
+  # If the client is known, log it (status + logs)
+  if [[ -n "$remote_addr" ]]; then
+    echo "$(date): Connection from $remote_addr" >> "$STATUS_FILE"
+    echo "$(date): Connection from $remote_addr" >> "$LOG_FILE"
+  fi
 
   # Clear the screen and hide the cursor
   clear
@@ -34,6 +40,7 @@ serve_animation() {
   stop_animation=false
   sigpipe_handler() {
     stop_animation=true
+    tput cnorm
   }
   trap sigpipe_handler PIPE
 
@@ -54,7 +61,14 @@ serve_animation() {
     done
   done
 
+  # If remote_addr is set, assume that means we had a connection (and now a disconnection)
+  if [[ -n "$remote_addr" ]]; then
+    echo "$(date): Disconnected $remote_addr" >> "$LOG_FILE"
+  fi
+
+  # Restore cursor visibility
   tput cnorm
+
   # Reset the trap
   trap - PIPE
 }
@@ -69,8 +83,9 @@ start_server() {
   fi
 
   echo "Starting server on port $PORT..."
-  echo "0" > "$STATUS_FILE"    # Reset connected users count
-  rm -f "$SHUTDOWN_FLAG"       # Clear any existing shutdown flag
+  echo "Server started: $(date)" >> "$LOG_FILE"   # Log server start
+  echo "0" > "$STATUS_FILE"                       # Reset connected users count
+  rm -f "$SHUTDOWN_FLAG"                          # Clear any existing shutdown flag
 
   # Run the server in the background
   (
@@ -80,9 +95,11 @@ start_server() {
       [[ -f "$SHUTDOWN_FLAG" ]] && break
 
       # Listen for incoming connections
-      nc -l -p "$PORT" -k -c "bash -c 'source \"$SCRIPT_PATH\"; \"$SCRIPT_PATH\" \"\$NCAT_REMOTE_ADDR\"'" &
+      nc -v -l -p "$PORT" -k -c "bash -c 'source \"$SCRIPT_PATH\"; \"$SCRIPT_PATH\" \"\$NCAT_REMOTE_ADDR\"'" &
       child_pid=$!
-      wait $child_pid || true  # Prevent client disconnection from killing the server
+      # Wait for the client to disconnect (or some error) but don't kill the server
+      wait "$child_pid" || true
+
       total_connections=$((total_connections + 1))
       echo "Total connections: $total_connections" > "$STATUS_FILE"
     done
@@ -125,6 +142,7 @@ stop_server() {
   kill "$pid"
   rm -f "$PID_FILE" "$SHUTDOWN_FLAG"
   echo "Server stopped."
+  echo "Server stopped: $(date)" >> "$LOG_FILE"
 }
 
 ###############################################################################
